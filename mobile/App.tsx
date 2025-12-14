@@ -1,69 +1,50 @@
-import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { Platform, SafeAreaView, ScrollView, StyleSheet, View } from 'react-native';
+import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Platform,
+  ScrollView,
+  StyleSheet,
+  View,
+  Text,
+  TextInput,
+  Button,
+} from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
-import { createNativeStackNavigator, NativeStackScreenProps } from '@react-navigation/native-stack';
-import { Appbar, Button, Card, List, Provider as PaperProvider, Snackbar, Text, TextInput } from 'react-native-paper';
-import { Camera, CameraType } from 'expo-camera';
+import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import * as Location from 'expo-location';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy'; 
 import * as Device from 'expo-device';
-import { Buffer } from 'buffer';
-import { sha256 } from 'js-sha256';
+// Buffer and sha256 removed to avoid reading large files into JS memory
 
-if (typeof global.Buffer === 'undefined') {
-  (global as unknown as { Buffer: typeof Buffer }).Buffer = Buffer;
-}
+// --- CONFIGURATION ---
+// VERIFY YOUR IP ADDRESS!
+const DEFAULT_SERVER_URL = "YOUR ADDEDRESS_HERE"; // e.g., "http://
+// ---------------------
 
-interface UserProfile {
-  id: string;
-  email: string;
-  name?: string | null;
-  role: string;
-}
+// No global Buffer required — avoid referencing `Buffer` in Expo managed app
 
-interface TripSummary {
-  id: string;
-  start_time_utc: string;
-  end_time_utc?: string | null;
-  status: string;
-  segments: Array<{ id: string; index: number; sha256?: string | null; file_size_bytes?: number | null }>;
-}
-
-interface AuthState {
-  token: string | null;
-  serverUrl: string;
-  user?: UserProfile;
-  deviceId?: string;
-}
-
-interface AuthContextValue extends AuthState {
-  setAuth: (state: AuthState) => void;
-}
+// --- TYPES & CONTEXT ---
+interface UserProfile { id: string; email: string; name?: string | null; role: string; }
+interface AuthState { token: string | null; serverUrl: string; user?: UserProfile; deviceId?: string; }
+interface AuthContextValue extends AuthState { setAuth: (state: AuthState) => void; }
 
 const AuthContext = createContext<AuthContextValue>({ token: null, serverUrl: '', setAuth: () => undefined });
-
 const Stack = createNativeStackNavigator();
-
 const useAuth = () => useContext(AuthContext);
 
+// --- API HELPER ---
 const API = {
   async request(path: string, options: RequestInit = {}, auth: AuthState): Promise<Response> {
-    if (!auth.serverUrl) {
-      throw new Error('Server URL not configured');
-    }
-    const baseHeaders: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-    if (auth.token) {
-      baseHeaders.Authorization = `Bearer ${auth.token}`;
-    }
+    if (!auth.serverUrl) throw new Error('Server URL not configured');
+    const baseHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (auth.token) baseHeaders.Authorization = `Bearer ${auth.token}`;
+    
     const res = await fetch(`${auth.serverUrl}${path}`, {
       ...options,
-      headers: {
-        ...baseHeaders,
-        ...(options.headers as Record<string, string> | undefined),
-      },
+      headers: { ...baseHeaders, ...(options.headers as Record<string, string> | undefined) },
     });
+    
     if (!res.ok) {
       const detail = await res.text();
       throw new Error(`Request failed (${res.status}): ${detail}`);
@@ -72,497 +53,352 @@ const API = {
   },
 };
 
-type RootStackParamList = {
-  Login: undefined;
-  Recorder: undefined;
-  History: undefined;
-};
+// --- SCREENS ---
 
-type LoginScreenProps = NativeStackScreenProps<RootStackParamList, 'Login'>;
-type RecorderScreenProps = NativeStackScreenProps<RootStackParamList, 'Recorder'>;
-type HistoryScreenProps = NativeStackScreenProps<RootStackParamList, 'History'>;
-
-const LoginScreen: React.FC<LoginScreenProps> = ({ navigation }) => {
+const LoginScreen: React.FC<any> = ({ navigation }) => {
   const auth = useAuth();
-  const [serverUrl, setServerUrl] = useState(auth.serverUrl || 'http://localhost:8000');
+  const [serverUrl, setServerUrl] = useState(auth.serverUrl || DEFAULT_SERVER_URL);
   const [email, setEmail] = useState('rider@example.com');
   const [password, setPassword] = useState('changeme');
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [statusMsg, setStatusMsg] = useState('');
 
-  const handleLogin = useCallback(async () => {
+  const handleLogin = async () => {
     try {
       setLoading(true);
-      setError(null);
+      setStatusMsg('Connecting...');
       const normalizedServer = serverUrl.replace(/\/$/, '');
-      const response = await API.request(
-        '/auth/token',
-        {
+      
+      const response = await API.request('/auth/token', {
           method: 'POST',
           body: JSON.stringify({ email, password, name: email.split('@')[0] }),
-        },
-        { ...auth, serverUrl: normalizedServer },
-      );
+      }, { ...auth, serverUrl: normalizedServer });
+      
       const tokenPayload = await response.json();
+      
       const profileResponse = await API.request('/me', {}, { ...auth, serverUrl: normalizedServer, token: tokenPayload.access_token });
       const profile = await profileResponse.json();
-      const newState: AuthState = {
+      
+      auth.setAuth({
         serverUrl: normalizedServer,
         token: tokenPayload.access_token,
         user: profile,
-      };
-      auth.setAuth(newState);
-      navigation.reset({ index: 0, routes: [{ name: 'Recorder' }] });
+      });
+      
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setStatusMsg(err instanceof Error ? err.message : 'Login failed');
     } finally {
       setLoading(false);
     }
-  }, [auth, email, navigation, password, serverUrl]);
+  };
 
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.form}>
-        <Text variant="titleLarge" style={styles.title}>BikeRecorder Login</Text>
-        <TextInput label="Server URL" value={serverUrl} onChangeText={setServerUrl} autoCapitalize="none" style={styles.input} />
-        <TextInput label="Email" value={email} onChangeText={setEmail} autoCapitalize="none" style={styles.input} />
-        <TextInput label="Password" value={password} onChangeText={setPassword} secureTextEntry style={styles.input} />
-        <Button mode="contained" onPress={handleLogin} loading={loading} disabled={loading} style={styles.cta}>
-          Sign In
-        </Button>
+      <View style={styles.content}>
+        <Text style={styles.header}>Bike Recorder</Text>
+        <Text style={styles.label}>Server URL</Text>
+        <TextInput style={styles.input} value={serverUrl} onChangeText={setServerUrl} autoCapitalize="none" />
+        <Text style={styles.label}>Email</Text>
+        <TextInput style={styles.input} value={email} onChangeText={setEmail} autoCapitalize="none" keyboardType="email-address" />
+        <Text style={styles.label}>Password</Text>
+        <TextInput style={styles.input} value={password} onChangeText={setPassword} secureTextEntry />
+        <View style={styles.spacer} />
+        <Button title={loading ? "Logging in..." : "Sign In"} onPress={handleLogin} disabled={loading} />
+        {!!statusMsg && <Text style={styles.errorText}>{statusMsg}</Text>}
       </View>
-      <Snackbar visible={!!error} onDismiss={() => setError(null)}>{error}</Snackbar>
     </SafeAreaView>
   );
 };
 
-interface RecordingState {
-  startedAt: Date | null;
-  videoUri: string | null;
-  locationSamples: Location.LocationObject[];
-}
-
-const RecorderScreen: React.FC<RecorderScreenProps> = ({ navigation }) => {
+const RecorderScreen: React.FC<any> = ({ navigation }) => {
   const auth = useAuth();
-  const cameraRef = useRef<Camera | null>(null);
-  const [cameraPermission, requestCameraPermission] = Camera.useCameraPermissions();
-  const [locationPermission, requestLocationPermission] = Location.useForegroundPermissions();
-  const [recordingState, setRecordingState] = useState<RecordingState>({ startedAt: null, videoUri: null, locationSamples: [] });
-  const [recordingPromise, setRecordingPromise] = useState<Promise<FileSystem.VideoRecording> | null>(null);
-  const [locationSub, setLocationSub] = useState<Location.LocationSubscription | null>(null);
-  const [timer, setTimer] = useState<number>(0);
-  const [deviceId, setDeviceId] = useState<string | undefined>(auth.deviceId);
-  const [uploading, setUploading] = useState(false);
-  const [snackbar, setSnackbar] = useState<string | null>(null);
+  const cameraRef = useRef<CameraView | null>(null);
+  
+  const [camPermission, requestCamPermission] = useCameraPermissions();
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
+  
+  const [isRecording, setIsRecording] = useState(false);
+  const [statusMsg, setStatusMsg] = useState('Ready');
+  const [timer, setTimer] = useState(0);
+  
+  // --- FIX: Use Ref for data to avoid stale closures ---
+  const recordingData = useRef<{startedAt: Date | null, locs: Location.LocationObject[]}>({ startedAt: null, locs: [] });
+  const [locCount, setLocCount] = useState(0); // Just for UI display
+  const [locSub, setLocSub] = useState<Location.LocationSubscription | null>(null);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout | null = null;
-    if (recordingState.startedAt) {
+    if (!camPermission?.granted) requestCamPermission();
+    if (!micPermission?.granted) requestMicPermission();
+    Location.requestForegroundPermissionsAsync();
+  }, [camPermission, micPermission]);
+
+  useEffect(() => {
+    let interval: any;
+    if (isRecording) {
       interval = setInterval(() => {
-        if (recordingState.startedAt) {
-          const diff = Math.floor((Date.now() - recordingState.startedAt.getTime()) / 1000);
-          setTimer(diff);
+        if (recordingData.current.startedAt) {
+            setTimer(Math.floor((Date.now() - recordingData.current.startedAt.getTime()) / 1000));
         }
       }, 1000);
-    } else {
-      setTimer(0);
     }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [recordingState.startedAt]);
+    return () => clearInterval(interval);
+  }, [isRecording]);
 
-  useEffect(() => {
-    if (!cameraPermission) {
-      requestCameraPermission();
-    }
-  }, [cameraPermission, requestCameraPermission]);
-
-  useEffect(() => {
-    if (!locationPermission) {
-      requestLocationPermission();
-    }
-  }, [locationPermission, requestLocationPermission]);
-
-  useEffect(() => () => {
-    if (locationSub) {
-      locationSub.remove();
-    }
-  }, [locationSub]);
-
-  const ensureDeviceRegistration = useCallback(async () => {
-    if (deviceId || !auth.token) {
-      return;
-    }
-    const platform = Platform.OS === 'ios' ? 'ios' : 'android';
-    const response = await API.request(
-      '/devices/register',
-      {
-        method: 'POST',
-        body: JSON.stringify({
-          platform,
-          model: Device.modelName ?? 'Unknown',
-          os_version: Device.osVersion ?? 'Unknown',
-          app_version: '0.1.0',
-        }),
-      },
-      auth,
-    );
-    const device = await response.json();
-    setDeviceId(device.id);
-    auth.setAuth({ token: auth.token, serverUrl: auth.serverUrl, user: auth.user, deviceId: device.id });
-  }, [auth, deviceId]);
-
-  const handleStartRecording = useCallback(async () => {
+  const startRecording = async () => {
     try {
-      await ensureDeviceRegistration();
-      if (!cameraPermission?.granted) {
-        const status = await requestCameraPermission();
-        if (!status.granted) {
-          throw new Error('Camera permission denied');
-        }
+      if (!cameraRef.current) return;
+      if (!camPermission?.granted || !micPermission?.granted) {
+        setStatusMsg('Missing Perms');
+        requestCamPermission();
+        requestMicPermission();
+        return;
       }
-      if (!locationPermission?.granted) {
-        const status = await requestLocationPermission();
-        if (!status.granted) {
-          throw new Error('Location permission denied');
-        }
+      
+      let devId = auth.deviceId;
+      if (!devId) {
+         const res = await API.request('/devices/register', {
+            method: 'POST',
+             body: JSON.stringify({ platform: Platform.OS, model: Device.modelName, os_version: Device.osVersion, app_version: '0.1.0' })
+         }, auth);
+         const d = await res.json();
+         devId = d.id;
+         auth.setAuth({...auth, deviceId: devId});
       }
-      const watch = await Location.watchPositionAsync(
-        {
-          accuracy: Location.Accuracy.BestForNavigation,
-          timeInterval: 1000,
-          distanceInterval: 0,
-        },
-        (sample) => {
-          setRecordingState((prev) => ({ ...prev, locationSamples: [...prev.locationSamples, sample] }));
-        },
+
+      // Reset Data
+      recordingData.current = { startedAt: new Date(), locs: [] };
+      setLocCount(0);
+
+      const sub = await Location.watchPositionAsync(
+        { accuracy: Location.Accuracy.BestForNavigation, timeInterval: 1000, distanceInterval: 0 },
+        (loc) => {
+            // Push to Ref (Always fresh)
+            recordingData.current.locs.push(loc);
+            // Update UI
+            setLocCount(recordingData.current.locs.length);
+        }
       );
-      setLocationSub(watch);
-      const startedAt = new Date();
-      setRecordingState({ startedAt, videoUri: null, locationSamples: [] });
-      const promise = cameraRef.current?.recordAsync({ quality: Camera.Constants.VideoQuality['1080p'], maxDuration: 7200 });
-      if (!promise) {
-        throw new Error('Camera not ready');
-      }
-      setRecordingPromise(promise);
-      setSnackbar('Recording started');
-    } catch (err) {
-      setSnackbar(err instanceof Error ? err.message : 'Unable to start recording');
+      setLocSub(sub);
+      
+      setIsRecording(true);
+      setStatusMsg('Recording...');
+      
+      const promise = cameraRef.current.recordAsync({ maxDuration: 7200 });
+      promise
+        .then((res) => { if(res) finishRecording(res.uri, devId!); })
+        .catch(e => { console.error(e); setIsRecording(false); setStatusMsg('Camera Error'); });
+        
+    } catch (e) {
+      setStatusMsg('Failed to start');
+      setIsRecording(false);
     }
-  }, [cameraPermission?.granted, ensureDeviceRegistration, locationPermission?.granted, requestCameraPermission, requestLocationPermission]);
+  };
 
-  const handleStopRecording = useCallback(async () => {
+  const stopRecording = () => {
+    if (cameraRef.current && isRecording) {
+      cameraRef.current.stopRecording();
+    }
+  };
+
+  const finishRecording = async (uri: string, devId: string) => {
+    setIsRecording(false);
+    if (locSub) locSub.remove();
+    setStatusMsg('Uploading...');
+    
     try {
-      if (!recordingPromise) {
-        return;
-      }
-      cameraRef.current?.stopRecording();
-      const recording = await recordingPromise;
-      if (locationSub) {
-        locationSub.remove();
-        setLocationSub(null);
-      }
-      setRecordingState((prev) => ({ ...prev, videoUri: recording.uri }));
-      setRecordingPromise(null);
-      setSnackbar('Recording saved. Preparing upload…');
-      await uploadTrip(recording.uri);
-    } catch (err) {
-      setSnackbar(err instanceof Error ? err.message : 'Failed to finalize recording');
-    }
-  }, [locationSub, recordingPromise, uploadTrip]);
+      // Check Ref for data (It will be correct now)
+      const startedAt = recordingData.current.startedAt;
+      const locations = recordingData.current.locs;
 
-  const uploadTrip = useCallback(
-    async (videoUri: string) => {
-      if (!auth.token || !deviceId || !recordingState.startedAt) {
-        setSnackbar('Missing recording context');
-        return;
-      }
+      if (!startedAt) throw new Error("Start time missing");
+
+      const fileInfo = await FileSystem.getInfoAsync(uri, { size: true });
+      if (!fileInfo.exists) throw new Error("File not found");
+      
+      const startIso = startedAt.toISOString();
+      const tripRes = await API.request('/trips', { method: 'POST', body: JSON.stringify({ device_id: devId, start_time_utc: startIso }) }, auth);
+      const trip = await tripRes.json();
+
+      const segRes = await API.request(`/trips/${trip.id}/segments`, {
+         method: 'POST',
+         body: JSON.stringify({ index: 0, video_codec: 'h264', expected_bytes: fileInfo.size, width: 1920, height: 1080, fps: 30 })
+      }, auth);
+      const segment = await segRes.json();
+
+      // Upload natively using expo-file-system.uploadAsync to avoid loading the file into JS memory.
+      const uploadUrl = `${auth.serverUrl.replace(/\/$/, '')}/uploads/multipart`;
+      console.log('[Uploader] Preparing native upload', { uploadUrl, uri });
+      console.log('[Uploader] fileInfo:', fileInfo);
+      let uploadResult;
       try {
-        setUploading(true);
-        const fileInfo = await FileSystem.getInfoAsync(videoUri, { size: true });
-        if (!fileInfo.exists || !fileInfo.size) {
-          throw new Error('Video file missing');
-        }
-        const startIso = recordingState.startedAt.toISOString();
-        const endIso = new Date().toISOString();
-        const tripResponse = await API.request(
-          '/trips',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              device_id: deviceId,
-              start_time_utc: startIso,
-            }),
+        uploadResult = await FileSystem.uploadAsync(uploadUrl, uri, {
+          httpMethod: 'POST',
+          uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+          fieldName: 'file',
+          headers: { Authorization: `Bearer ${auth.token}` },
+          parameters: {
+            trip_id: String(trip.id),
+            segment_id: String(segment.id),
+            filename: 'seg.mp4',
+            file_type: 'video_mp4',
           },
-          auth,
-        );
-        const trip = await tripResponse.json();
-        const segmentResponse = await API.request(
-          `/trips/${trip.id}/segments`,
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              index: 0,
-              video_codec: 'h264',
-              expected_bytes: fileInfo.size,
-              width: 1920,
-              height: 1080,
-              fps: 30,
-            }),
-          },
-          auth,
-        );
-        const segment = await segmentResponse.json();
-        const base64 = await FileSystem.readAsStringAsync(videoUri, { encoding: FileSystem.EncodingType.Base64 });
-        const buffer = Buffer.from(base64, 'base64');
-        const checksum = sha256(buffer);
-        const uploadResponse = await API.request(
-          '/uploads',
-          {
-            method: 'POST',
-            body: JSON.stringify({
-              trip_id: trip.id,
-              segment_id: segment.id,
-              filename: 'segment.mp4',
-              file_type: 'video_mp4',
-              sha256: checksum,
-              upload_length: buffer.length,
-            }),
-          },
-          auth,
-        );
-        const upload = await uploadResponse.json();
-        const chunkSize = 5 * 1024 * 1024;
-        let offset = 0;
-        while (offset < buffer.length) {
-          const nextChunk = buffer.subarray(offset, offset + chunkSize);
-          await API.request(
-            `/uploads/${upload.id}`,
-            {
-              method: 'PATCH',
-              headers: {
-                'Content-Type': 'application/offset+octet-stream',
-                'Upload-Offset': String(offset),
-              },
-              body: nextChunk as any,
-            },
-            auth,
-          );
-          offset += nextChunk.length;
-        }
-        await API.request(
-          `/trips/${trip.id}/segments/${segment.id}`,
-          {
-            method: 'PATCH',
-            body: JSON.stringify({
-              file_size_bytes: buffer.length,
-              sha256: checksum,
-              duration_s: timer,
-              status: 'complete',
-            }),
-          },
-          auth,
-        );
-        const metadataLines = recordingState.locationSamples.map((sample) =>
-          JSON.stringify({
-            ts: new Date(sample.timestamp ?? Date.now()).toISOString(),
-            lat: sample.coords.latitude,
-            lon: sample.coords.longitude,
-            alt: sample.coords.altitude,
-            spd: sample.coords.speed,
-            brg: sample.coords.heading,
-            acc: sample.coords.accuracy,
-          }),
-        );
-        await API.request(
-          `/segments/${segment.id}/metadata`,
-          {
-            method: 'POST',
-            body: JSON.stringify({ type: 'gps_jsonl', content: metadataLines.join('\n'), filename: 'track.jsonl' }),
-          },
-          auth,
-        );
-        const duration = Math.max(
-          timer,
-          Math.floor((new Date(endIso).getTime() - recordingState.startedAt.getTime()) / 1000),
-        );
-        await API.request(
-          `/trips/${trip.id}`,
-          {
-            method: 'PATCH',
-            body: JSON.stringify({ end_time_utc: endIso, duration_s: duration, status: 'complete' }),
-          },
-          auth,
-        );
-        setRecordingState({ startedAt: null, videoUri: null, locationSamples: [] });
-        setTimer(0);
-        setSnackbar('Upload complete');
-      } catch (err) {
-        setSnackbar(err instanceof Error ? err.message : 'Upload failed');
-      } finally {
-        setUploading(false);
+        });
+        console.log('[Uploader] uploadAsync finished', { status: uploadResult.status, headers: uploadResult.headers });
+      } catch (uploadErr) {
+        console.error('[Uploader] uploadAsync threw', uploadErr);
+        throw uploadErr;
       }
-    },
-    [auth, deviceId, recordingState.locationSamples, recordingState.startedAt, timer],
-  );
 
-  const isRecording = !!recordingPromise;
+      // uploadResult.status, uploadResult.body (string), uploadResult.headers
+      if (uploadResult.status < 200 || uploadResult.status >= 300) {
+        console.error('[Uploader] upload failed response', { status: uploadResult.status, body: uploadResult.body });
+        throw new Error(`Upload failed: ${uploadResult.status} ${uploadResult.body}`);
+      }
+
+      // Server returns JSON with computed sha and size; parse it
+      let uploadJson = {} as any;
+      try { uploadJson = JSON.parse(uploadResult.body || '{}'); } catch (e) { console.warn('[Uploader] failed to parse upload body', e); }
+
+      const returnedSize = uploadJson.size ?? (await FileSystem.getInfoAsync(uri, { size: true })).size;
+      const returnedSha = uploadJson.sha ?? null;
+
+      await API.request(`/trips/${trip.id}/segments/${segment.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ file_size_bytes: returnedSize, sha256: returnedSha, duration_s: timer, status: 'complete' })
+      }, auth);
+
+      const lines = locations.map(l => JSON.stringify({
+         ts: new Date(l.timestamp).toISOString(),
+         lat: l.coords.latitude,
+         lon: l.coords.longitude,
+         alt: l.coords.altitude,
+         spd: l.coords.speed
+      }));
+      await API.request(`/segments/${segment.id}/metadata`, {
+         method: 'POST',
+         body: JSON.stringify({ type: 'gps_jsonl', content: lines.join('\n'), filename: 'gps.jsonl' })
+      }, auth);
+
+      await API.request(`/trips/${trip.id}`, {
+         method: 'PATCH',
+         body: JSON.stringify({ end_time_utc: new Date().toISOString(), duration_s: timer, status: 'complete' })
+      }, auth);
+
+      setStatusMsg('Success!');
+      setTimer(0);
+      setLocCount(0);
+      
+    } catch (e) {
+       setStatusMsg('Upload Failed: ' + (e instanceof Error ? e.message : String(e)));
+       console.error(e);
+    }
+  };
 
   return (
     <SafeAreaView style={styles.container}>
-      <Appbar.Header>
-        <Appbar.Content title="Recorder" />
-        <Appbar.Action icon="history" onPress={() => navigation.navigate('History')} />
-      </Appbar.Header>
+      <View style={styles.headerRow}>
+         <Text style={styles.headerTitle}>Recorder</Text>
+         <Button title="History" onPress={() => navigation.navigate('History')} />
+      </View>
+      
       <View style={styles.cameraContainer}>
-        <Camera ref={(ref) => (cameraRef.current = ref)} style={styles.camera} type={CameraType.back} ratio="16:9" />
+         <CameraView ref={cameraRef} style={styles.camera} facing="back" mode="video" />
       </View>
+      
       <View style={styles.hud}>
-        <Text variant="titleLarge">{new Date(timer * 1000).toISOString().substring(11, 19)}</Text>
-        <Text variant="bodyMedium">GPS samples: {recordingState.locationSamples.length}</Text>
+         <Text style={styles.timerText}>{new Date(timer * 1000).toISOString().substring(11, 19)}</Text>
+         <Text>GPS Points: {locCount}</Text>
+         <Text style={styles.statusText}>{statusMsg}</Text>
       </View>
-      <View style={styles.actions}>
-        <Button mode="contained" icon={isRecording ? 'stop' : 'record'} onPress={isRecording ? handleStopRecording : handleStartRecording} disabled={uploading}>
-          {isRecording ? 'Stop Recording' : 'Start Recording'}
-        </Button>
+      
+      <View style={styles.controls}>
+        <Button 
+          title={isRecording ? "STOP RECORDING" : "START RECORDING"} 
+          onPress={isRecording ? stopRecording : startRecording}
+          color={isRecording ? "red" : "#007AFF"}
+        />
       </View>
-      <Snackbar visible={!!snackbar} onDismiss={() => setSnackbar(null)} duration={4000}>
-        {snackbar}
-      </Snackbar>
     </SafeAreaView>
   );
 };
 
-const HistoryScreen: React.FC<HistoryScreenProps> = ({ navigation }) => {
+const HistoryScreen: React.FC<any> = ({ navigation }) => {
   const auth = useAuth();
   const [trips, setTrips] = useState<TripSummary[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const loadTrips = useCallback(async () => {
-    if (!auth.token) {
-      return;
-    }
-    try {
-      setLoading(true);
-      const res = await API.request('/trips', {}, auth);
-      const payload = await res.json();
-      setTrips(payload.trips ?? []);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load trips');
-    } finally {
-      setLoading(false);
-    }
-  }, [auth]);
 
   useEffect(() => {
-    const unsubscribe = navigation.addListener('focus', () => {
-      loadTrips();
-    });
-    return unsubscribe;
-  }, [loadTrips, navigation]);
+     const load = async () => {
+       try {
+         const res = await API.request('/trips', {}, auth);
+         const json = await res.json();
+         setTrips(json.trips || []);
+       } catch (e) { console.error(e); }
+     };
+     load();
+  }, []);
 
   return (
     <SafeAreaView style={styles.container}>
-      <Appbar.Header>
-        <Appbar.BackAction onPress={() => navigation.goBack()} />
-        <Appbar.Content title="Trip History" />
-      </Appbar.Header>
-      <ScrollView contentContainerStyle={styles.listContainer}>
-        {loading ? (
-          <Text style={styles.placeholder}>Loading…</Text>
-        ) : trips.length === 0 ? (
-          <Text style={styles.placeholder}>No trips yet</Text>
-        ) : (
-          trips.map((trip) => (
-            <Card key={trip.id} style={styles.tripCard}>
-              <Card.Title title={new Date(trip.start_time_utc).toLocaleString()} subtitle={`Status: ${trip.status}`} />
-              <Card.Content>
-                <Text>Segments: {trip.segments.length}</Text>
-                {trip.segments.map((segment) => (
-                  <List.Item
-                    key={segment.id}
-                    title={`Segment ${segment.index}`}
-                    description={`Bytes: ${segment.file_size_bytes ?? 'n/a'} Hash: ${segment.sha256?.slice(0, 8) ?? 'n/a'}`}
-                    left={(props) => <List.Icon {...props} icon="film" />}
-                  />
-                ))}
-              </Card.Content>
-            </Card>
-          ))
-        )}
+      <View style={styles.headerRow}>
+        <Button title="Back" onPress={() => navigation.goBack()} />
+        <Text style={styles.headerTitle}>History</Text>
+      </View>
+      <ScrollView style={styles.content}>
+         {trips.map(t => (
+            <View key={t.id} style={styles.card}>
+               <Text style={styles.cardTitle}>{new Date(t.start_time_utc).toLocaleString()}</Text>
+               <Text>Status: {t.status}</Text>
+               <Text>Files: {t.segments.length}</Text>
+            </View>
+         ))}
       </ScrollView>
-      <Snackbar visible={!!error} onDismiss={() => setError(null)}>{error}</Snackbar>
     </SafeAreaView>
   );
 };
 
+// --- ROOT ---
 const App: React.FC = () => {
-  const [authState, setAuthState] = useState<AuthState>({ token: null, serverUrl: '' });
-  const contextValue = useMemo<AuthContextValue>(() => ({ ...authState, setAuth: setAuthState }), [authState]);
+  const [auth, setAuth] = useState<AuthState>({ token: null, serverUrl: '' });
+  const authCtx = useMemo(() => ({ ...auth, setAuth }), [auth]);
+
   return (
-    <PaperProvider>
-      <AuthContext.Provider value={contextValue}>
+    <SafeAreaProvider>
+        <AuthContext.Provider value={authCtx}>
         <NavigationContainer>
-          <Stack.Navigator initialRouteName={authState.token ? 'Recorder' : 'Login'}>
-            <Stack.Screen name="Login" component={LoginScreen} options={{ headerShown: false }} />
-            <Stack.Screen name="Recorder" component={RecorderScreen} options={{ headerShown: false }} />
-            <Stack.Screen name="History" component={HistoryScreen} options={{ headerShown: false }} />
-          </Stack.Navigator>
+            <Stack.Navigator screenOptions={{ headerShown: false }}>
+            {!auth.token ? (
+                <Stack.Screen name="Login" component={LoginScreen} />
+            ) : (
+                <>
+                <Stack.Screen name="Recorder" component={RecorderScreen} />
+                <Stack.Screen name="History" component={HistoryScreen} />
+                </>
+            )}
+            </Stack.Navigator>
         </NavigationContainer>
-      </AuthContext.Provider>
-    </PaperProvider>
+        </AuthContext.Provider>
+    </SafeAreaProvider>
   );
 };
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#f2f2f2',
-  },
-  form: {
-    flex: 1,
-    padding: 16,
-    justifyContent: 'center',
-  },
-  title: {
-    textAlign: 'center',
-    marginBottom: 24,
-  },
-  input: {
-    marginVertical: 8,
-  },
-  cta: {
-    marginTop: 16,
-  },
-  cameraContainer: {
-    flex: 3,
-    backgroundColor: 'black',
-  },
-  camera: {
-    flex: 1,
-  },
-  hud: {
-    padding: 16,
-    alignItems: 'center',
-    backgroundColor: '#ffffff',
-  },
-  actions: {
-    padding: 16,
-    backgroundColor: '#ffffff',
-  },
-  listContainer: {
-    padding: 16,
-    gap: 12,
-  },
-  tripCard: {
-    marginBottom: 12,
-  },
-  placeholder: {
-    textAlign: 'center',
-    marginTop: 24,
-  },
+  container: { flex: 1, backgroundColor: '#F2F2F7' },
+  content: { padding: 20, flex: 1 },
+  header: { fontSize: 28, fontWeight: 'bold', marginBottom: 30, textAlign: 'center', marginTop: 20 },
+  label: { fontSize: 16, marginBottom: 5, color: '#333' },
+  input: { backgroundColor: 'white', padding: 12, borderRadius: 8, marginBottom: 15, borderWidth: 1, borderColor: '#ddd' },
+  spacer: { height: 20 },
+  errorText: { color: 'red', textAlign: 'center', marginTop: 20 },
+  cameraContainer: { flex: 1, backgroundColor: 'black', margin: 10, borderRadius: 12, overflow: 'hidden' },
+  camera: { flex: 1 },
+  hud: { padding: 15, alignItems: 'center', backgroundColor: 'white' },
+  timerText: { fontSize: 32, fontWeight: 'bold', fontFamily: Platform.OS === 'ios' ? 'Courier' : 'monospace' },
+  statusText: { marginTop: 5, color: '#666' },
+  controls: { padding: 20, paddingBottom: 40 },
+  headerRow: { flexDirection: 'row', alignItems: 'center', padding: 15, backgroundColor: 'white', borderBottomWidth: 1, borderColor: '#eee' },
+  headerTitle: { fontSize: 18, fontWeight: 'bold', flex: 1, textAlign: 'center', marginRight: 40 },
+  card: { backgroundColor: 'white', padding: 15, marginBottom: 10, borderRadius: 8 },
+  cardTitle: { fontWeight: 'bold', marginBottom: 5 }
 });
 
 export default App;
